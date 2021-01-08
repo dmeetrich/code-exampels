@@ -219,3 +219,137 @@ async mergeImagesAndUpload(orderImage: OrderImage, frames: IFrame[]) {
     );
   }
 ```
+
+```typescript
+async addWatermarkAndUpload(
+    file: FileToUpload & { fileName: string },
+    pathToWatermark: string,
+  ): Promise<UploadResultDto> {
+    try {
+      const watermark = await readFile(pathToWatermark);
+      const inputFileMeta = await sharp(file.buffer).metadata();
+      const croppedWatermarkBuffer = await sharp(watermark)
+        .resize({
+          width: Math.round(inputFileMeta.width * CROP_RATIO),
+        })
+        .toBuffer();
+      const watermarkedImageBuffer = await sharp(file.buffer)
+        .composite([
+          {
+            input: croppedWatermarkBuffer,
+            gravity: 'south',
+          },
+        ])
+        .toBuffer();
+
+      return this.fileManagementService.upload(
+        {
+          buffer: watermarkedImageBuffer,
+          mimetype: 'image/png',
+          originalname: file.originalname,
+        },
+        {
+          folder: ORDER_IMAGES_FOLDER,
+          randomFileName: false,
+          fileName: `${file.fileName}-WATERMARKED`,
+        },
+      );
+    } catch (error) {
+      logger.error('Add watermark to image failed', { error });
+
+      throw new Error('Add watermark to image failed');
+    }
+  }
+```
+
+```typescript
+import { head } from 'ramda';
+
+createInventoryInDatabase({
+  inventory,
+  originalPackaging,
+  warehousePackaging,
+  userInfo = {},
+}: {
+  inventory: InventoryDto;
+  originalPackaging: PackagingDto;
+  warehousePackaging: PackagingDto;
+  userInfo: { userId: number; companyId: number } | {};
+}): Promise<FullInventoryDto> {
+  return this.knex.transaction(async trx => {
+    const inventoryData = await this.knex('inventory')
+      .insert({ ...inventory, ...userInfo })
+      .transacting(trx)
+      .returning('*')
+      .then<InventoryDto>(head);
+
+    const newOriginalPackaging = await this.knex('original_packaging')
+      .insert({ ...originalPackaging, inventoryId: inventoryData.id })
+      .transacting(trx)
+      .returning('*')
+      .then<PackagingDto>(head);
+
+    const newWarehousePackaging = await this.knex('warehouse_packaging')
+      .insert({ ...warehousePackaging, inventoryId: inventoryData.id })
+      .transacting(trx)
+      .returning('*')
+      .then<PackagingDto>(head);
+
+    return {
+      ...inventoryData,
+      originalPackaging: newOriginalPackaging,
+      warehousePackaging: newWarehousePackaging,
+    };
+  });
+}
+
+const takeWarehousePackaging = pipe(
+  pick(warehousePackagingFields),
+  renameKeys(warehousePackagingMapping),
+);
+
+const takeOriginalPackaging = pipe(
+  pick(originalPackagingFields),
+  renameKeys(originalPackagingMapping),
+);
+
+const takeInventory = pick(inventoryFields);
+
+importInventory(fullInventoryData): Promise<FullInventoryDto> {
+  const inventory = takeInventory(fullInventoryData);
+  const originalPackaging = takeOriginalPackaging(fullInventoryData);
+  const warehousePackaging = takeWarehousePackaging(fullInventoryData);
+
+  return this.createInventoryInDatabase({ inventory, originalPackaging, warehousePackaging });
+}
+
+const xlsxRegexp = /\.xlsx?/;
+
+async importInventoryFromFile(file: IUploadedFile): Promise<HttpStatus> {
+  if (!xlsxRegexp.test(file.originalname)) {
+    throw new HttpException('Unsupported file extension', HttpStatus.BAD_REQUEST);
+  }
+
+  const wb = XLSX.read(file.buffer, { type: 'buffer', cellDates: true });
+  const { SheetNames } = wb;
+
+  try {
+    await Promise.all(
+      SheetNames.map(sheetName => {
+        const inventoriesData = XLSX.utils.sheet_to_json(wb.Sheets[sheetName]);
+
+        return Promise.all(
+          inventoriesData.map(data => {
+            return this.importInventory(data);
+          }),
+        );
+      }),
+    );
+
+    return HttpStatus.OK;
+  } catch (err) {
+    this.logger.error({ err }, 'Error importing file');
+    throw new HttpException('Error importing file', HttpStatus.INTERNAL_SERVER_ERROR);
+  }
+}
+```
